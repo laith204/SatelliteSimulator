@@ -4,9 +4,15 @@ A MATLAB-based simulator for Delay Tolerant Networking (DTN) over LEO satellite 
 
 ## Getting Started
 
+### For Simulation 1:
+
 1.  Open MATLAB.
-2.  Navigate to this folder.
+2.  Navigate to this folder and open Simulation_1.
 3.  Run `main.m` in the command window.
+
+### For Simulation 2:
+
+**********
 
 ## Documentation
 
