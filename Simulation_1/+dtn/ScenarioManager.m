@@ -4,14 +4,14 @@ classdef ScenarioManager < handle
     % Responsibilities:
     %   - Own the satelliteScenario
     %   - Add/remove satellites and ground stations
-    %   - Keep a simple node list (name, type, handle)
-    %   - Maintain access objects between all node pairs (for viewer lines)
-    %   - Provide lat/lon/alt lookup at a given time
+    %   - Keep a simple node list (name, type, handle, lat/lon/alt)
+    %   - Maintain access objects (for viewer lines) BETWEEN SATELLITES ONLY
+    %   - Provide lat/lon/alt and XYZ lookup at a given time
     
     properties
         sc             % satelliteScenario
         nodes          % struct array of nodes
-        accesses       % struct array of access objects
+        accesses       % struct array of access objects (sat-sat only)
         startTime      datetime
         stopTime       datetime
         sampleTime     double
@@ -26,6 +26,7 @@ classdef ScenarioManager < handle
             obj.sampleTime = sampleTime;
             
             obj.sc = satelliteScenario(startTime, stopTime, sampleTime);
+            
             obj.nodes    = struct('name',{},'type',{},'handle',{}, ...
                                   'latDeg',{},'lonDeg',{},'altM',{});
             obj.accesses = struct('nodeA',{},'nodeB',{},'handle',{});
@@ -41,9 +42,9 @@ classdef ScenarioManager < handle
                 error('Node with name %s already exists.', name);
             end
             
-            Re = 6371e3;            % Earth radius in meters (approx)
+            Re = 6371e3;          % Earth radius in meters (approx)
             altM = altKm * 1e3;
-            sma  = Re + altM;       % semi-major axis
+            sma  = Re + altM;     % semi-major axis
             ecc  = 0;
             argPeri  = 0;
             trueAnom = 0;
@@ -66,6 +67,8 @@ classdef ScenarioManager < handle
         function addGroundStation(obj, name, latDeg, lonDeg, altM)
             % addGroundStation - create a groundStation
             %
+            % We DO NOT create any access() involving ground stations
+            % to avoid internal satelliteScenarioViewer bugs.
             
             if obj.hasNode(name)
                 error('Node with name %s already exists.', name);
@@ -86,7 +89,7 @@ classdef ScenarioManager < handle
             
             obj.nodes(end+1) = node;
             
-            obj.createAccessesForNewNode(name);
+            % NOTE: no access() created for GS; only sat-sat in createAccessesForNewNode
         end
         
         function removeNode(obj, name)
@@ -156,7 +159,7 @@ classdef ScenarioManager < handle
             node = obj.nodes(idx);
             
             if strcmp(node.type, 'gs')
-                % Ground station: constant position, no need to call states
+                % Ground station: constant position
                 latDeg = node.latDeg;
                 lonDeg = node.lonDeg;
                 altM   = node.altM;
@@ -170,11 +173,12 @@ classdef ScenarioManager < handle
                 altM   = pos(3);
             end
         end
-
+        
         function [xKm, yKm, zKm] = getXYZ(obj, nodeName, t)
-            % getXYZ - ECEF-ish position in km for any node.
-            % Satellites: use states(...,'geographic') via getLatLonAlt.
-            % Ground stations: use stored lat/lon/alt (fixed).
+            % getXYZ - position in km for DTN geometry / LOS tests
+            %
+            % For satellites: use states(handle, t) in meters.
+            % For ground stations: compute simple ECEF from stored lat/lon/alt.
             
             idx = obj.findNodeIndex(nodeName);
             if isempty(idx)
@@ -182,33 +186,39 @@ classdef ScenarioManager < handle
             end
             node = obj.nodes(idx);
             
-            ReKm = 6371;  % Earth radius in km (approx)
-            
             if strcmp(node.type, 'gs')
-                % Ground station: fixed geographic coordinates
-                latDeg = node.latDeg;
-                lonDeg = node.lonDeg;
-                altM   = node.altM;
+                % Ground station: approximate ECEF from lat/lon/alt
+                ReKm   = 6371;                    % Earth radius in km
+                altKm  = node.altM / 1000;
+                latRad = deg2rad(node.latDeg);
+                lonRad = deg2rad(node.lonDeg);
+                r      = ReKm + altKm;
+                
+                xKm = r * cos(latRad) * cos(lonRad);
+                yKm = r * cos(latRad) * sin(lonRad);
+                zKm = r * sin(latRad);
             else
-                % Satellite: get geographic coordinates from states()
-                [latDeg, lonDeg, altM] = obj.getLatLonAlt(nodeName, t);
+                % Satellite: use states() from satelliteScenario
+                pos = states(node.handle, t);   % [3 x 1 x 1] in meters
+                pos = squeeze(pos);
+                
+                xKm = pos(1) / 1000;
+                yKm = pos(2) / 1000;
+                zKm = pos(3) / 1000;
             end
-            
-            rKm  = ReKm + altM/1000;
-            latR = deg2rad(latDeg);
-            lonR = deg2rad(lonDeg);
-            
-            xKm = rKm * cos(latR) * cos(lonR);
-            yKm = rKm * cos(latR) * sin(lonR);
-            zKm = rKm * sin(latR);
         end
-
     end
     
     methods (Access = private)
         function createAccessesForNewNode(obj, newName)
             % createAccessesForNewNode - create access objects with all
-            % existing nodes when a new node is added
+            % existing nodes when a new SATELLITE node is added.
+            %
+            % IMPORTANT:
+            %   To avoid MATLAB internal bugs in satelliteScenarioViewer
+            %   related to GroundStation/updateVisualizations, we ONLY
+            %   create access() objects between SATELLITES. We do NOT
+            %   create access objects that involve ground stations.
             
             idxNew = obj.findNodeIndex(newName);
             if isempty(idxNew)
@@ -221,7 +231,15 @@ classdef ScenarioManager < handle
                 if k == idxNew
                     continue;
                 end
-                aName = obj.nodes(k).name;
+                
+                otherNode = obj.nodes(k);
+                
+                % Only create access between satellites; skip anything with GS
+                if strcmp(newNode.type, 'gs') || strcmp(otherNode.type, 'gs')
+                    continue;
+                end
+                
+                aName = otherNode.name;
                 bName = newNode.name;
                 
                 % Avoid duplicates
@@ -229,7 +247,7 @@ classdef ScenarioManager < handle
                     continue;
                 end
                 
-                aHandle = obj.nodes(k).handle;
+                aHandle = otherNode.handle;
                 bHandle = newNode.handle;
                 
                 acHandle = access(aHandle, bHandle);
